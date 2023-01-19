@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+
+import sys
+import re
+import os
+
+def main():
+    global lineCount
+    lineCount = 0
+
+    flags = []     
+    cmds = initSed(flags)
+    cmds = initCmdList(cmds)
+
+    # if there are args that specify input files
+    numInstructArgs = 2 + len(flags)
+    if len(sys.argv) > numInstructArgs:
+        inputFiles = sys.argv[numInstructArgs:]
+        sedFiles(inputFiles, cmds)
+    # exec sed on std input
+    else:
+        sedStdIn(cmds)
+
+def initSed(flags):
+    cmds = None    
+    for arg in sys.argv:
+        if arg.startswith("-"):
+            flags.append(arg)
+        elif arg != sys.argv[0]:
+            cmds = arg
+            break
+    
+    checkValid(cmds, flags)
+
+    global nFlag, fFlag
+    nFlag = "-n" in flags
+    fFlag = "-f" in flags
+    if fFlag:
+        if os.path.isfile(cmds):
+            with open(cmds) as fp:
+                cmds = fp.read()
+        else:
+            sys.stderr.write("slippy: error\n")
+            sys.exit(1)   
+
+    return cmds
+
+def checkValid(cmds, flags):
+    dupeFlags = flags.count("-f") > 1    
+    validFlag = True
+    validFlags = ["-f", "-n", "-i"]
+    for flag in flags:
+        validFlag = flag in validFlags
+
+    if len(sys.argv) == 1 or dupeFlags or (not validFlag) or (not cmds):
+        sys.stderr.write('usage: slippy [-i] [-n] [-f <script-file> | <sed-command>] [<files>...]\n')
+        sys.exit(1)
+
+def initCmdList(cmds):
+    cmds = re.sub("#.*(\n|$)", ";", cmds).replace(" ", "")
+    cmds = cmds.replace("\n", ";").split(';')
+    return cmds
+
+def sedStdIn(cmds):
+    global lineCount
+    currLine = None
+    nextLine = sys.stdin.readline()
+    while nextLine:
+        lineCount += 1
+        currLine = nextLine
+        nextLine = sys.stdin.readline()
+        isLast = not nextLine
+        execCmds(currLine, isLast, cmds)
+
+def sedFiles(inputFiles, cmds):
+    global lineCount
+    inputLines = []
+    for file in inputFiles:
+        if os.path.isfile(file):
+            with open(file) as fp:
+                for line in fp:
+                    inputLines.append(line)
+        else:
+            sys.stderr.write("slippy: error\n")
+            sys.exit(1)
+    for line in inputLines:   
+        lineCount += 1
+        isLast = line == inputLines[-1]   
+        execCmds(line, isLast, cmds)       
+
+def execCmds(currLine, isLast, cmds):
+    global lineCount, nFlag
+    doPrint = not nFlag
+    doQuit = False
+    
+    for cmd in cmds:
+        if not cmd:
+            continue
+        nthLine = re.search("^[0-9]+", cmd)
+        if nthLine:
+            nthLine = int(nthLine.group()) 
+
+        if '/' in cmd and not cmd.split("/")[1]:
+            sys.stderr.write("slippy: command line: invalid command\n")
+            sys.exit(1)
+
+        indexMatches = nthLine and lineCount == nthLine
+        regexFound = '/' in cmd and re.search(cmd.split("/")[1], currLine)
+        atAddress = indexMatches or regexFound or (isLast and cmd[0] == '$')
+
+        if cmd[-1] == 'd' and atAddress or cmd == 'd':
+            doPrint = False
+        elif cmd[-1] == 'p' and atAddress or cmd == 'p':
+            print(currLine, end = "")
+        elif cmd[-1] == 'q' and atAddress and doPrint or cmd == 'q':            
+            doQuit = True
+            break
+        elif re.search("^[0-9]*s", cmd) or re.search("^/.+/s", cmd) or cmd.startswith("$s"):
+            currLine = doSub(currLine, isLast, cmd)
+
+    if doPrint:
+        print(currLine, end = "")     
+    if doQuit:
+        sys.exit()  
+
+def doSub(currLine, isLast, cmd):
+    global lineCount
+
+    # find the delimiter
+    delim = '/'
+    if re.search("^[0-9]*s", cmd):
+        delim = cmd.replace(re.search("^[0-9]*s", cmd).group(), "")[0]
+    if re.search("^/.+/s", cmd):
+        delim = cmd.replace(re.search("^/.+/s", cmd).group(), "")[0]                
+    
+    # regex to be replaced
+    toBeReplaced = None
+    toBeReplaced = re.search("s/[^\/]+/", cmd.replace(delim, '/')).group().replace("s/","").replace("/","")
+    if not toBeReplaced:
+        sys.stderr.write("slippy: command line: invalid command\n")
+        sys.exit(1)
+    
+    # conditions 
+    address = re.search(f"^.+s/", cmd.replace(delim, '/'))
+    addressFound = False
+    if address:
+        address = address.group().replace(f"s{delim}","")
+        if '/' in address:
+            address = address.replace("/","")
+            addressFound = re.search(address, currLine)       
+    addressFound = addressFound or (isLast and address == "$")
+    indexMatches = address and (address == str(lineCount)) 
+
+    # if conds are met, then sub
+    if addressFound or indexMatches or not address:
+        newText = re.search("s/.+/.*/", cmd.replace(delim, '/')).group().replace(f"s/{toBeReplaced}/", "")
+        newText = newText[:-1]
+        replaceOnce = 1 if cmd[-1] != 'g' else 0
+        return re.sub(toBeReplaced, newText, currLine, count=replaceOnce) 
+
+    # otherwise, return unmodified line
+    return currLine
+
+main()
